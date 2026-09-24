@@ -17,12 +17,26 @@ jobs:
       CGO_CFLAGS: "-Wno-deprecated-declarations"
 
     steps:
+    
+      - name: Disable Git CRLF conversion
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          
       - name: Checkout WeKnora v0.8.2
         uses: actions/checkout@v6
         with:
           repository: Tencent/WeKnora
           ref: v0.8.2
           fetch-depth: 0
+          
+      - name: Fix Windows CRLF in license manifest
+        shell: bash
+        run: |
+          sed -i 's/\r$//' licenses/sources/modules.tsv
+          echo "License manifest:"
+          sed -n '1,5l' licenses/sources/modules.tsv
+          bash ./scripts/check-license-bundle.sh
 
       - name: Verify source
         shell: pwsh
