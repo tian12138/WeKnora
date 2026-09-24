@@ -77,7 +77,27 @@ jobs:
           npm --version
           gcc --version
           & "$env:USERPROFILE\go\bin\wails.exe" version
+          
+      - name: Pre-compile Go packages for Windows
+        shell: bash
+        run: |
+          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
+          export CGO_CFLAGS="-Wno-deprecated-declarations"
 
+          cd cmd/desktop
+
+          echo "=== Pre-compiling desktop packages serially ==="
+
+          go build \
+            -p 1 \
+            -buildvcs=false \
+            -tags "desktop,sqlite_fts5,production" \
+            -o _prebuild_tmp.exe . || true
+
+          rm -f _prebuild_tmp.exe
+
+          echo "=== Pre-compile finished ==="
+          
       - name: Build WeKnora Lite Windows installer
         shell: bash
         run: |
