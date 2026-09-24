@@ -1,4 +1,4 @@
-name: Build WeKnora Lite Windows
+name: Test WeKnora Lite Windows Build
 
 on:
   workflow_dispatch:
@@ -7,43 +7,32 @@ permissions:
   contents: read
 
 jobs:
-  build-windows:
+  test-build:
     runs-on: windows-latest
 
     env:
       CGO_ENABLED: "1"
       EDITION: "lite"
       GOLANG_PROTOBUF_REGISTRATION_CONFLICT: "warn"
-      CGO_CFLAGS: "-Wno-deprecated-declarations"
 
     steps:
-    
+
       - name: Disable Git CRLF conversion
         shell: pwsh
         run: |
           git config --global core.autocrlf false
-          
+
       - name: Checkout WeKnora v0.8.2
         uses: actions/checkout@v6
         with:
           repository: Tencent/WeKnora
           ref: v0.8.2
           fetch-depth: 0
-          
-      - name: Fix Windows CRLF in license manifest
+
+      - name: Fix license manifest CRLF
         shell: bash
         run: |
           sed -i 's/\r$//' licenses/sources/modules.tsv
-          echo "License manifest:"
-          sed -n '1,5l' licenses/sources/modules.tsv
-          bash ./scripts/check-license-bundle.sh
-
-      - name: Verify source
-        shell: pwsh
-        run: |
-          git status
-          git describe --tags --always
-          git rev-parse --short HEAD
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -51,95 +40,52 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install Wails
-        shell: pwsh
-        run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
-          "$env:USERPROFILE\go\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Install NSIS
-        shell: pwsh
-        run: |
-          choco install nsis -y
-
-      - name: Check environment
-        shell: pwsh
-        run: |
-          go version
-          node --version
-          npm --version
-          gcc --version
-          & "$env:USERPROFILE\go\bin\wails.exe" version
-          
-      - name: Pre-compile Go packages for Windows
+      - name: Prepare SQLite headers
         shell: bash
         run: |
+          go mod download
+
+          SQLITE_DIR="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)"
+
+          echo "SQLite module: $SQLITE_DIR"
+
+          mkdir -p "$GITHUB_WORKSPACE/.deps/sqlite"
+
+          cp "$SQLITE_DIR/sqlite3-binding.h" \
+             "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3.h"
+
+          cp "$SQLITE_DIR/sqlite3ext.h" \
+             "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3ext.h"
+
+          ls -lh "$GITHUB_WORKSPACE/.deps/sqlite"
+
+      - name: Test native Windows Go build
+        shell: bash
+        run: |
+          export CGO_ENABLED=1
+          export EDITION=lite
           export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
-          export CGO_CFLAGS="-Wno-deprecated-declarations"
+          export CGO_CFLAGS="-I${GITHUB_WORKSPACE}/.deps/sqlite -Wno-deprecated-declarations"
+
+          echo "Go:"
+          go version
+
+          echo "GCC:"
+          gcc --version
+
+          echo "Start direct Go build"
 
           cd cmd/desktop
-
-          echo "=== Pre-compiling desktop packages serially ==="
 
           go build \
             -p 1 \
             -buildvcs=false \
             -tags "desktop,sqlite_fts5,production" \
-            -o _prebuild_tmp.exe . || true
+            -o _prebuild_tmp.exe .
 
-          rm -f _prebuild_tmp.exe
+          echo
+          echo "=================================="
+          echo "DIRECT GO BUILD SUCCESS"
+          echo "=================================="
 
-          echo "=== Pre-compile finished ==="
-          
-      - name: Build WeKnora Lite Windows installer
-        shell: bash
-        run: |
-          export EDITION=lite
-          export CGO_ENABLED=1
-          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
-          export CGO_CFLAGS="-Wno-deprecated-declarations"
-
-          LDFLAGS="$(./scripts/get_version.sh ldflags) -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
-
-          bash ./scripts/check-license-bundle.sh
-
-          cd cmd/desktop
-
-          wails build \
-            -clean \
-            -tags "sqlite_fts5" \
-            -platform "windows/amd64" \
-            -nsis \
-            -ldflags="${LDFLAGS}" \
-            -o "WeKnora Lite"
-
-      - name: Collect installer
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifact
-
-          Get-ChildItem "cmd\desktop\build\bin" -Recurse
-
-          Copy-Item `
-            "cmd\desktop\build\bin\WeKnora Lite-amd64-installer.exe" `
-            "artifact\WeKnora-Lite-v0.8.2-windows-amd64-setup.exe"
-
-          Get-FileHash `
-            "artifact\WeKnora-Lite-v0.8.2-windows-amd64-setup.exe" `
-            -Algorithm SHA256 |
-            Format-List |
-            Out-File "artifact\SHA256.txt"
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v7
-        with:
-          name: WeKnora-Lite-v0.8.2-Windows-amd64
-          path: artifact/
-          retention-days: 7
+          ls -lh _prebuild_tmp.exe
