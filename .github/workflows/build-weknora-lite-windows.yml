@@ -20,7 +20,16 @@ jobs:
       - name: Checkout WeKnora v0.8.2
         uses: actions/checkout@v6
         with:
+          repository: Tencent/WeKnora
           ref: v0.8.2
+          fetch-depth: 0
+
+      - name: Verify source
+        shell: pwsh
+        run: |
+          git status
+          git describe --tags --always
+          git rev-parse --short HEAD
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -55,30 +64,13 @@ jobs:
           gcc --version
           & "$env:USERPROFILE\go\bin\wails.exe" version
 
-      - name: Precompile Windows packages
-        shell: bash
-        run: |
-          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
-          export CGO_CFLAGS="-Wno-deprecated-declarations"
-
-          cd cmd/desktop
-
-          go build \
-            -p 1 \
-            -buildvcs=false \
-            -tags "desktop,sqlite_fts5,production" \
-            -o _prebuild_tmp.exe . || true
-
-          rm -f _prebuild_tmp.exe
-
       - name: Build WeKnora Lite Windows installer
         shell: bash
         run: |
           export EDITION=lite
+          export CGO_ENABLED=1
           export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
           export CGO_CFLAGS="-Wno-deprecated-declarations"
-
-          eval "$(./scripts/get_version.sh env)"
 
           LDFLAGS="$(./scripts/get_version.sh ldflags) -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
 
@@ -99,6 +91,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifact
 
+          Get-ChildItem "cmd\desktop\build\bin" -Recurse
+
           Copy-Item `
             "cmd\desktop\build\bin\WeKnora Lite-amd64-installer.exe" `
             "artifact\WeKnora-Lite-v0.8.2-windows-amd64-setup.exe"
@@ -108,8 +102,6 @@ jobs:
             -Algorithm SHA256 |
             Format-List |
             Out-File "artifact\SHA256.txt"
-
-          Get-ChildItem artifact
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
