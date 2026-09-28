@@ -1,91 +1,324 @@
-name: Test WeKnora Lite Windows Build
+name: Build WeKnora Lite v0.8.2 Windows
 
+# 仅允许手动运行
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# 如果误点两次 Run workflow，后一次自动取消前一次
+concurrency:
+  group: weknora-lite-v0.8.2-windows
+  cancel-in-progress: true
+
 jobs:
-  test-build:
+  build:
+    name: Build Windows amd64
     runs-on: windows-latest
+    timeout-minutes: 30
 
     env:
       CGO_ENABLED: "1"
       EDITION: "lite"
       GOLANG_PROTOBUF_REGISTRATION_CONFLICT: "warn"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
 
+      # ------------------------------------------------------------
+      # 1. 避免 Windows 自动把 LF 转换成 CRLF
+      # ------------------------------------------------------------
       - name: Disable Git CRLF conversion
         shell: pwsh
         run: |
           git config --global core.autocrlf false
 
-      - name: Checkout WeKnora v0.8.2
+      # ------------------------------------------------------------
+      # 2. 始终编译腾讯官方 v0.8.2
+      #    不依赖当前 Fork 中有没有 v0.8.2 tag
+      # ------------------------------------------------------------
+      - name: Checkout official WeKnora v0.8.2
         uses: actions/checkout@v6
         with:
           repository: Tencent/WeKnora
           ref: v0.8.2
           fetch-depth: 0
 
-      - name: Fix license manifest CRLF
+      # ------------------------------------------------------------
+      # 3. 验证实际编译版本
+      # ------------------------------------------------------------
+      - name: Verify source version
+        shell: bash
+        run: |
+          echo "===== Source ====="
+          git describe --tags --always
+          git rev-parse --short HEAD
+          git status --short
+
+      # ------------------------------------------------------------
+      # 4. 修复 licenses/sources/modules.tsv 的 CRLF
+      #    否则 check-license-bundle.sh 会把 checksum 判为非法
+      # ------------------------------------------------------------
+      - name: Fix license manifest
         shell: bash
         run: |
           sed -i 's/\r$//' licenses/sources/modules.tsv
+          bash ./scripts/check-license-bundle.sh
 
+      # ------------------------------------------------------------
+      # 5. Go
+      #    直接读取 v0.8.2 go.mod，目前会得到 Go 1.26
+      # ------------------------------------------------------------
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
 
-      - name: Prepare SQLite headers
+      # ------------------------------------------------------------
+      # 6. 下载 Go modules
+      # ------------------------------------------------------------
+      - name: Download Go modules
         shell: bash
         run: |
           go mod download
+          go version
 
+      # ------------------------------------------------------------
+      # 7. sqlite-vec 在 Windows CGO 下要求 sqlite3.h
+      #
+      #    mattn/go-sqlite3 已经包含 SQLite amalgamation header，
+      #    直接复用即可，不需要额外安装 SQLite SDK/MSYS2 SQLite。
+      # ------------------------------------------------------------
+      - name: Prepare SQLite headers
+        shell: bash
+        run: |
           SQLITE_DIR="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)"
 
-          echo "SQLite module: $SQLITE_DIR"
+          echo "go-sqlite3:"
+          echo "$SQLITE_DIR"
 
           mkdir -p "$GITHUB_WORKSPACE/.deps/sqlite"
 
-          cp "$SQLITE_DIR/sqlite3-binding.h" \
-             "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3.h"
+          cp \
+            "$SQLITE_DIR/sqlite3-binding.h" \
+            "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3.h"
 
-          cp "$SQLITE_DIR/sqlite3ext.h" \
-             "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3ext.h"
+          cp \
+            "$SQLITE_DIR/sqlite3ext.h" \
+            "$GITHUB_WORKSPACE/.deps/sqlite/sqlite3ext.h"
 
+          echo "===== SQLite headers ====="
           ls -lh "$GITHUB_WORKSPACE/.deps/sqlite"
 
-      - name: Test native Windows Go build
+      # ------------------------------------------------------------
+      # 8. Node 22
+      # ------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ------------------------------------------------------------
+      # 9. 前端依赖 + 编译
+      #
+      #    手工编译 frontend 后，Wails 使用 -s 跳过重复 frontend build。
+      # ------------------------------------------------------------
+      - name: Build frontend
+        shell: bash
+        working-directory: frontend
+        run: |
+          echo "Node:"
+          node --version
+
+          echo "npm:"
+          npm --version
+
+          npm ci
+          npm run build
+
+          echo "===== Frontend dist ====="
+          ls -lh dist | head
+
+      # ------------------------------------------------------------
+      # 10. 缓存 Wails CLI
+      # ------------------------------------------------------------
+      - name: Cache Wails CLI
+        id: wails-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/go/bin/wails.exe
+          key: wails-v2.14.0-windows-amd64
+
+      # ------------------------------------------------------------
+      # 11. Wails v2.14.0
+      #
+      #     固定版本，避免 @latest 后续变化。
+      # ------------------------------------------------------------
+      - name: Install Wails CLI
+        if: steps.wails-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.14.0
+
+      - name: Add Wails to PATH
+        shell: pwsh
+        run: |
+          "$env:USERPROFILE\go\bin" |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # ------------------------------------------------------------
+      # 12. 安装 NSIS
+      # ------------------------------------------------------------
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+
+      # ------------------------------------------------------------
+      # 13. 环境确认
+      # ------------------------------------------------------------
+      - name: Check build environment
         shell: bash
         run: |
-          export CGO_ENABLED=1
-          export EDITION=lite
-          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
-          export CGO_CFLAGS="-I${GITHUB_WORKSPACE}/.deps/sqlite -Wno-deprecated-declarations"
-
-          echo "Go:"
+          echo "===== Go ====="
           go version
 
-          echo "GCC:"
-          gcc --version
+          echo "===== GCC ====="
+          gcc --version | head -1
 
-          echo "Start direct Go build"
+          echo "===== Node ====="
+          node --version
+
+          echo "===== npm ====="
+          npm --version
+
+          echo "===== Wails ====="
+          wails version
+
+      # ------------------------------------------------------------
+      # 14. 正式 Windows Desktop 构建
+      #
+      # 重要：
+      #
+      # -skipbindings
+      #   v0.8.2 已经提交生成后的 Wails bindings；
+      #   不再让 Wails 调 go/packages 扫描整个 WeKnora，
+      #   因此避开之前：
+      #
+      #   neo4j-go-driver ... without types
+      #
+      # -s
+      #   前端已经 npm run build，不重复构建。
+      #
+      # CGO_CFLAGS
+      #   加入我们刚准备好的 sqlite3.h。
+      # ------------------------------------------------------------
+      - name: Build WeKnora Lite Windows installer
+        shell: bash
+        run: |
+          export EDITION=lite
+          export CGO_ENABLED=1
+          export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
+
+          export CGO_CFLAGS="\
+          -I${GITHUB_WORKSPACE}/.deps/sqlite \
+          -Wno-deprecated-declarations"
+
+          echo "===== Version information ====="
+
+          eval "$(./scripts/get_version.sh env)"
+
+          echo "Version:    ${VERSION}"
+          echo "Commit:     ${COMMIT_ID}"
+          echo "Build time: ${BUILD_TIME}"
+
+          LDFLAGS="$(./scripts/get_version.sh ldflags) \
+          -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
+
+          echo "===== License bundle ====="
+          bash ./scripts/check-license-bundle.sh
+
+          echo "===== Start Wails Build ====="
 
           cd cmd/desktop
 
-          go build \
-            -p 1 \
-            -buildvcs=false \
-            -tags "desktop,sqlite_fts5,production" \
-            -o _prebuild_tmp.exe .
+          wails build \
+            -clean \
+            -skipbindings \
+            -s \
+            -tags "sqlite_fts5" \
+            -platform "windows/amd64" \
+            -nsis \
+            -ldflags="${LDFLAGS}" \
+            -o "WeKnora Lite"
 
           echo
-          echo "=================================="
-          echo "DIRECT GO BUILD SUCCESS"
-          echo "=================================="
+          echo "========================================"
+          echo "WEKNORA LITE BUILD SUCCESS"
+          echo "========================================"
 
-          ls -lh _prebuild_tmp.exe
+          ls -lh build/bin
+
+      # ------------------------------------------------------------
+      # 15. 收集最终安装包
+      # ------------------------------------------------------------
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $Source = "cmd\desktop\build\bin\WeKnora Lite-amd64-installer.exe"
+
+          if (!(Test-Path $Source)) {
+              Write-Host "Installer not found."
+              Write-Host "Contents of build/bin:"
+              Get-ChildItem "cmd\desktop\build\bin" -Recurse
+              exit 1
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path artifact | Out-Null
+
+          Copy-Item `
+            $Source `
+            "artifact\WeKnora-Lite-v0.8.2-windows-amd64-setup.exe"
+
+          $Hash = Get-FileHash `
+            "artifact\WeKnora-Lite-v0.8.2-windows-amd64-setup.exe" `
+            -Algorithm SHA256
+
+          @"
+          File:
+          WeKnora-Lite-v0.8.2-windows-amd64-setup.exe
+
+          SHA256:
+          $($Hash.Hash)
+          "@ | Set-Content "artifact\SHA256.txt"
+
+          Write-Host ""
+          Write-Host "===== FINAL ARTIFACT ====="
+
+          Get-ChildItem artifact |
+            Format-Table Name, Length
+
+          Get-Content artifact\SHA256.txt
+
+      # ------------------------------------------------------------
+      # 16. 上传
+      #
+      # GitHub 会自动把这些文件打成 ZIP。
+      # ------------------------------------------------------------
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: WeKnora-Lite-v0.8.2-Windows-amd64
+          path: |
+            artifact/WeKnora-Lite-v0.8.2-windows-amd64-setup.exe
+            artifact/SHA256.txt
+          retention-days: 7
+          if-no-files-found: error
